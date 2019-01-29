@@ -3,10 +3,7 @@
 #include "HttpLiveServer.h"
 #include "LiveWorker.h"
 // 其他模块引用
-#include "SipInstance.h"
-#include "h264.h"
-#include "flv.h"
-#include "mp4.h"
+//#include "SipInstance.h"
 
 namespace HttpWsServer
 {
@@ -17,15 +14,11 @@ namespace HttpWsServer
             return g_strError_play_faild;
         }
 
-        CLiveWorker* pWorker = GetLiveWorker(devCode);
-        if (!pWorker) {
-            pWorker = CreatLiveWorker(devCode);
-        }
+        CLiveWorker* pWorker = CreatLiveWorker(devCode, pss);
         if(!pWorker) {
             Log::error("CreatFlvBuffer failed%s", devCode.c_str());
             return g_strError_play_faild;
         }
-        pWorker->AddConnect(pss);
 
         pss->m_pWorker = pWorker;
         return "";
@@ -36,63 +29,9 @@ namespace HttpWsServer
         LIVE_BUFF tag = pWorker->GetFlvVideo(&pss->tail);
         if(tag.pBuff == nullptr) return;
 
-        if (!pss->m_bSendHead) {
-            LIVE_BUFF flvheader = pWorker->GetFlvHeader();
-            if(flvheader.pBuff == nullptr) return;
-
-            Log::debug("first flv data with header: tail:%d",pss->tail);
-            int len = flvheader.nLen + tag.nLen;
-            uint8_t* buff = (uint8_t *)malloc(len + LWS_PRE);
-            int nPos = LWS_PRE;
-            memcpy(buff + nPos, flvheader.pBuff, flvheader.nLen);
-            nPos += flvheader.nLen;
-            memcpy(buff + nPos, tag.pBuff + LWS_PRE, tag.nLen);
-            int wlen = lws_write(pss->wsi, (uint8_t *)buff + LWS_PRE, len, LWS_WRITE_BINARY);
-            pss->m_bSendHead = true;
-            free(buff);
-            pWorker->NextWork(pss);
-        } else {
-            Log::debug(" flv data tail:%d", pss->tail);
-            int wlen = lws_write(pss->wsi, (uint8_t *)tag.pBuff + LWS_PRE, tag.nLen, LWS_WRITE_BINARY);
-            pWorker->NextWork(pss);
-        }
-    }
-
-    static void SendLiveH264(pss_http_ws_live *pss) {
-        LIVE_BUFF tag = pss->m_pWorker->GetH264Video(&pss->tail);
-		if(tag.pBuff == nullptr) return;
-
-        Log::debug(" h264 data tail:%d", pss->tail);
+        Log::debug(" flv data tail:%d", pss->tail);
         int wlen = lws_write(pss->wsi, (uint8_t *)tag.pBuff + LWS_PRE, tag.nLen, LWS_WRITE_BINARY);
-        pss->m_pWorker->NextWork(pss);
-    }
-
-    static void SendLiveMp4(pss_http_ws_live *pss)
-    {
-        CLiveWorker* pWorker = (CLiveWorker*)pss->m_pWorker;
-        LIVE_BUFF tag = pWorker->GetMp4Video(&pss->tail);
-        if(tag.pBuff == nullptr) return;
-
-        if (!pss->m_bSendHead) {
-            LIVE_BUFF mp4_header = pWorker->GetMp4Header();
-            if(mp4_header.pBuff == nullptr) return;
-
-            Log::debug("first mp4 data with header: tail:%d",pss->tail);
-            int len = mp4_header.nLen + tag.nLen;
-            uint8_t* buff = (uint8_t *)malloc(len + LWS_PRE);
-            int nPos = LWS_PRE;
-            memcpy(buff + nPos, mp4_header.pBuff, mp4_header.nLen);
-            nPos += mp4_header.nLen;
-            memcpy(buff + nPos, tag.pBuff + LWS_PRE, tag.nLen);
-            int wlen = lws_write(pss->wsi, (uint8_t *)buff + LWS_PRE, len, LWS_WRITE_BINARY);
-            pss->m_bSendHead = true;
-            free(buff);
-            pWorker->NextWork(pss);
-        } else {
-            Log::debug(" mp4 data tail:%d", pss->tail);
-            int wlen = lws_write(pss->wsi, (uint8_t *)tag.pBuff + LWS_PRE, tag.nLen, LWS_WRITE_BINARY);
-            pWorker->NextWork(pss);
-        }
+        pWorker->NextWork(pss);
     }
 
     int callback_live_http(struct lws *wsi, enum lws_callback_reasons reason, void *user, void *in, size_t len)
@@ -191,15 +130,7 @@ namespace HttpWsServer
                     break;
 
                 if (strlen(pss->strErrInfo) == 0) {
-
-                    if(pss->media_type == media_flv){
-                        SendLiveFlv(pss);
-                    } else if(pss->media_type == media_h264){
-                        SendLiveH264(pss);
-                    } else if(pss->media_type == media_mp4){
-                        SendLiveMp4(pss);
-                    }
-                    //lws_callback_on_writable(wsi);
+                    SendLiveFlv(pss);
                     return 0;
                 } else {
                     int len = strlen(pss->strErrInfo);
@@ -217,7 +148,7 @@ namespace HttpWsServer
             {
                 if (!pss || !pss->m_pWorker)
                     break;
-                pss->m_pWorker->DelConnect(pss);
+                pss->m_pWorker->Clear2Stop();
             }
         default:
             break;
@@ -314,16 +245,7 @@ namespace HttpWsServer
                     break;
 
                 //Log::debug("live ws protocol writeable %s", pss->path);
-                int len = 0;
-                int wlen = 0;
-                if(pss->media_type == media_flv){
-                    SendLiveFlv(pss);
-                } else if(pss->media_type == media_h264) {
-                    SendLiveH264(pss);
-                } else if(pss->media_type == media_mp4){
-                    SendLiveMp4(pss);
-                }
-
+                SendLiveFlv(pss);
                 return 0;
             }
         case LWS_CALLBACK_CLOSED:
@@ -331,7 +253,7 @@ namespace HttpWsServer
                 if (!pss || !pss->m_pWorker)
                     break;
                 Log::debug("live ws protocol cloes %s", pss->path);
-                pss->m_pWorker->DelConnect(pss);
+                pss->m_pWorker->Clear2Stop();
             }
         default:
             break;

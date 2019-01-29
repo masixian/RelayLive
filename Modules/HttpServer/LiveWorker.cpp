@@ -1,16 +1,39 @@
 #include "stdafx.h"
+#include "RtpClient.h"
 #include "HttpLiveServer.h"
 #include "LiveWorker.h"
 //其他模块
-//#include "SipInstance.h"
-#include "libLive.h"
 #include "uvIpc.h"
+
+#define PACK_MAX_SIZE 1700 
+#define FFMPEG_INPUT_SIZE 32768
+
+extern "C"
+{
+#define snprintf  _snprintf
+#include "libavdevice/avdevice.h"
+#include "libavcodec/avcodec.h"  
+#include "libavformat/avformat.h"  
+#include "libswscale/swscale.h"  
+#include "libavutil/imgutils.h"
+#include "libavutil/timestamp.h"
+}
+#pragma comment(lib,"avcodec.lib")
+#pragma comment(lib,"avdevice.lib")
+#pragma comment(lib,"avfilter.lib")
+#pragma comment(lib,"avformat.lib")
+#pragma comment(lib,"avutil.lib")
+#pragma comment(lib,"postproc.lib")
+#pragma comment(lib,"swresample.lib")
+#pragma comment(lib,"swscale.lib")
 
 namespace HttpWsServer
 {
-	extern uv_loop_t *g_uv_loop;
+    //////////////////////////////////////////////////////////////////////////////////
 
-    static map<string,CLiveWorker*>  m_workerMap;
+	extern uv_loop_t *g_uv_loop;
+    static uv_ipc_handle_t* h = NULL;
+    static map<int,CLiveWorker*>  m_workerMap;
     static CriticalSection           m_cs;
 
     static string m_strRtpIP;            //< RTP服务IP
@@ -21,18 +44,8 @@ namespace HttpWsServer
 
     static vector<int>     m_vecRtpPort;     //< RTP可用端口，使用时从中取出，使用结束重新放入
     static CriticalSection m_csRTP;          //< RTP端口锁
-    static bool _do_port = false;
 
-    static uv_ipc_handle_t* h = NULL;
-
-    struct ipc_play_task
-    {
-        int ipc_status;
-        int ret;
-        string ssid;
-        string error;
-    };
-    static ipc_play_task _ipc_task;
+    ////////////////////////////////////////////////////////////////////////////////////////////////
 
     static string strfind(char* src, char* begin, char* end){
         char *p1, *p2;
@@ -47,45 +60,37 @@ namespace HttpWsServer
     static void on_ipc_recv(uv_ipc_handle_t* h, void* user, char* name, char* msg, char* data, int len) {
         if (!strcmp(msg,"live_play_answer")) {
             // ssid=123&ret=0&error=XXXX
-			data[len] = 0;
-            _ipc_task.ssid = strfind(data, "ssid=", "&");
-            _ipc_task.ret = stoi(strfind(data, "ret=", "&"));
-            _ipc_task.error = strfind(data, "error=", "&");
-            _ipc_task.ipc_status = 0;
+            data[len] = 0;
+            int ssid = stoi(strfind(data, "ssid=", "&"));
+            int ret = stoi(strfind(data, "ret=", "&"));
+            string error = strfind(data, "error=", "&");
+
+            MutexLock lock(&m_cs);
+            auto itFind = m_workerMap.find(ssid);
+            if (itFind != m_workerMap.end())
+            {
+                if (!ret) {
+                    itFind->second->RealPlaySuccess();
+                } else {
+                    itFind->second->stop();
+                }
+            }
         }
     }
 
-    static int real_play(string dev_code, string rtp_ip, int rtp_port){
-        // ssid=123&rtpip=1.1.1.1&rtpport=50000
-        _ipc_task.ssid = dev_code;
-        _ipc_task.ret = 0;
-        _ipc_task.ipc_status = 1;
-        _ipc_task.error = "";
-
-        stringstream ss;
-        ss << "ssid=" << dev_code << "&rtpip=" << rtp_ip << "&rtpport=" << rtp_port;
-        int ret = uv_ipc_send(h, "liveSrc", "live_play", (char*)ss.str().c_str(), ss.str().size());
-        if(ret) {
-            Log::error("ipc send real play error");
-            return ret;
+    void ipc_init(){
+        /** 进程间通信 */
+        int ret = uv_ipc_client(&h, "relay_live", NULL, "liveDest", on_ipc_recv, NULL);
+        if(ret < 0) {
+            printf("ipc server err: %s\n", uv_ipc_strerr(ret));
         }
-
-        while (_ipc_task.ipc_status) Sleep(100);
-        return _ipc_task.ret;
     }
 
-    static int stop_play(string dev_code){
-        int ret = uv_ipc_send(h, "liveSrc", "stop_play", (char*)dev_code.c_str(), dev_code.size());
-        if(ret) {
-            Log::error("ipc send stop error");
-            return ret;
-        }
-		return 0;
-    }
-
+    /////////////////////////////////////////////////////////////////////////////////////////////////
 
     static int GetRtpPort()
     {
+        static bool _do_port = false;
         MutexLock lock(&m_csRTP);
         if(!_do_port) {
             _do_port = true;
@@ -127,26 +132,6 @@ namespace HttpWsServer
         msg->nLen = 0;
     }
 
-    /** 延时销毁定时器从loop中移除完成 */
-    static void stop_timer_close_cb(uv_handle_t* handle) {
-        CLiveWorker* live = (CLiveWorker*)handle->data;
-        if (live->m_bStop){
-            live->Clear2Stop();
-        } else {
-            Log::debug("new client comed, and will not close live stream");
-        }
-    }
-
-    /** 客户端全部断开后，延时断开源的定时器 */
-	static void stop_timer_cb(uv_timer_t* handle) {
-		CLiveWorker* live = (CLiveWorker*)handle->data;
-		int ret = uv_timer_stop(handle);
-		if(ret < 0) {
-			Log::error("timer stop error:%s",uv_strerror(ret));
-        }
-        live->m_bStop = true;
-        uv_close((uv_handle_t*)handle, stop_timer_close_cb);
-	}
 
     /** CLiveWorker析构中删除m_pLive比较耗时，会阻塞event loop，因此使用线程。 */
     static void live_worker_destory_thread(void* arg) {
@@ -154,156 +139,302 @@ namespace HttpWsServer
         SAFE_DELETE(live);
     }
 
+    /** 播放超时，没有收到播放进程返回的结果 */
+    static void play_timeout_timer_cb(uv_timer_t* handle){
+        CLiveWorker *pLive = (CLiveWorker*)handle->data;
+        pLive->stop();
+    }
+
+    /** ffmpeg解码编码线程 */
+    static void real_play(void* arg){
+        CLiveWorker* pLive = (CLiveWorker*)arg;
+        pLive->Play();
+    }
+
+    static int read_buffer(void *opaque, uint8_t *buf, int buf_size){
+        CLiveWorker* pLive = (CLiveWorker*)opaque;
+        return pLive->ReadInput(buf, buf_size);
+    }
+
+    static int write_buffer(void *opaque, uint8_t *buf, int buf_size){
+        CLiveWorker* pLive = (CLiveWorker*)opaque;
+        //Log::debug("write_buffer size:%d \n", buf_size);
+        pLive->push_flv_frame((char*)buf, buf_size);
+        return buf_size;
+    }
+
     //////////////////////////////////////////////////////////////////////////
 
-    CLiveWorker::CLiveWorker(string strCode, int rtpPort)
+    CLiveWorker::CLiveWorker(string strCode, int rtpPort, pss_http_ws_live *pss)
         : m_strCode(strCode)
         , m_nPort(rtpPort)
+        , m_pPssList(pss)
         , m_nType(0)
-        , m_pLive(nullptr)
         , m_bStop(false)
         , m_bOver(false)
+        , m_nRtpLen(0)
+        , m_nRtpRead(0)
     {
-        memset(&m_stFlvHead, 0, sizeof(m_stFlvHead));
-        memset(&m_stMP4Head, 0, sizeof(m_stMP4Head));
-        m_pFlvRing  = lws_ring_create(sizeof(LIVE_BUFF), 100, destroy_ring_node);
-        m_pH264Ring = lws_ring_create(sizeof(LIVE_BUFF), 100, destroy_ring_node);
-        m_pMP4Ring  = lws_ring_create(sizeof(LIVE_BUFF), 100, destroy_ring_node);
-
-		liblive_option opt = {m_nPort, m_nRtpCatchPacketNum, m_nRtpStreamType};
-        m_pLive = IlibLive::CreateObj(opt);
-        m_pLive->SetCallback(this);
-        m_pLive->StartListen();
+        m_pRing  = lws_ring_create(sizeof(LIVE_BUFF), 100, destroy_ring_node);
+        m_pRtp = new CRtpClient(this, g_uv_loop, rtpPort);
+        m_pRtpBuff = (char*)malloc(FFMPEG_INPUT_SIZE);
+        m_nRtpBuffLen = FFMPEG_INPUT_SIZE;
     }
 
     CLiveWorker::~CLiveWorker()
     {
-        //if(m_nType == 0) {
-        //    if (!SipInstance::StopPlay(m_strCode)) {
-        //        Log::error("stop play failed");
-        //    }
-        //} else {
-        //    if (!SipInstance::StopRecordPlay(m_strCode, "")) {
-        //        Log::error("stop play failed");
-        //    }
-        //}
-        if(stop_play(m_strCode)) {
-            Log::error("stop play failed");
-        }
-        SAFE_DELETE(m_pLive);
-        lws_ring_destroy(m_pFlvRing);
-        lws_ring_destroy(m_pH264Ring);
-        lws_ring_destroy(m_pMP4Ring);
+        StopAsync();
+        lws_ring_destroy(m_pRing);
         GiveBackRtpPort(m_nPort);
         Log::debug("CLiveWorker release");
     }
 
-    bool CLiveWorker::AddConnect(pss_http_ws_live* pss)
+    bool CLiveWorker::RealPlayAsync(int rtpPort)
     {
-        if(pss->media_type == media_flv) {
-            m_bFlv = true;
-            pss->pss_next = m_pFlvPssList;
-            m_pFlvPssList = pss;
-            pss->tail = lws_ring_get_oldest_tail(m_pFlvRing);
-        } else if (pss->media_type == media_h264) {
-            m_bH264 = true;
-            pss->pss_next = m_pH264PssList;
-            m_pH264PssList = pss;
-            pss->tail = lws_ring_get_oldest_tail(m_pH264Ring);
-        } else if (pss->media_type == media_mp4) {
-            m_bMp4 = true;
-            pss->pss_next = m_pMP4PssList;
-            m_pMP4PssList = pss;
-            pss->tail = lws_ring_get_oldest_tail(m_pMP4Ring);
-        } else {
+        // ssid=123&rtpip=1.1.1.1&rtpport=50000
+        stringstream ss;
+        ss << "ssid=" << m_strCode << "&rtpip=" << m_strRtpIP << "&rtpport=" << rtpPort;
+        int ret = uv_ipc_send(h, "liveSrc", "live_play", (char*)ss.str().c_str(), ss.str().size());
+        if(ret) {
+            Log::error("ipc send real play error");
             return false;
         }
 
-        //如果刚刚开启了结束定时器，需要将其关闭
-        if(uv_is_active((const uv_handle_t*)&m_uvTimerStop)) {
-            uv_timer_stop(&m_uvTimerStop);
-            uv_close((uv_handle_t*)&m_uvTimerStop, stop_timer_close_cb);
-        }
+        m_uvTimerPlayTimeOut.data = this;
+        uv_timer_init(g_uv_loop, &m_uvTimerPlayTimeOut);
+        uv_timer_start(&m_uvTimerPlayTimeOut, play_timeout_timer_cb, 20000, 0);
+        
         return true;
     }
 
-    bool CLiveWorker::DelConnect(pss_http_ws_live* pss)
+    void CLiveWorker::RealPlaySuccess()
     {
-        if(pss->media_type == media_flv) {
-            lws_ll_fwd_remove(pss_http_ws_live, pss_next, pss, m_pFlvPssList);
-            if(nullptr == m_pFlvPssList) m_bFlv = false;
-        } else if(pss->media_type == media_h264){
-            lws_ll_fwd_remove(pss_http_ws_live, pss_next, pss, m_pH264PssList);
-            if (nullptr == m_pH264PssList) m_bH264 = false;
-        } else if(pss->media_type == media_mp4) {
-            lws_ll_fwd_remove(pss_http_ws_live, pss_next, pss, m_pMP4PssList);
-            if (nullptr == m_pMP4PssList) m_bMp4 = false;
+        //成功将定时器关掉即可
+        if(uv_is_active((const uv_handle_t*)&m_uvTimerPlayTimeOut)) {
+            uv_timer_stop(&m_uvTimerPlayTimeOut);
+            uv_close((uv_handle_t*)&m_uvTimerPlayTimeOut, NULL);
         }
 
-        if(m_pFlvPssList == NULL && m_pH264PssList == NULL && m_pMP4PssList == NULL) {
-            if(m_bOver) {
-                // 视频源没有数据，超时，不需要延时
-                Clear2Stop();
+        uv_thread_t tid;
+        uv_thread_create(&tid, real_play, (void*)this);
+    }
+
+    void CLiveWorker::StopAsync()
+    {
+        string ssid = StringHandle::toStr<int>(m_nPort);
+        int ret = uv_ipc_send(h, "liveSrc", "stop_play", (char*)ssid.c_str(), ssid.size());
+        if(ret) {
+            Log::error("ipc send stop error");
+        }
+    }
+
+    bool CLiveWorker::Play()
+    {
+        AVFormatContext *ifc = NULL;
+        AVFormatContext *ofc = NULL;
+
+        ifc = avformat_alloc_context();
+        unsigned char * iobuffer=(unsigned char *)av_malloc(FFMPEG_INPUT_SIZE);
+        ifc->pb =avio_alloc_context(iobuffer, FFMPEG_INPUT_SIZE, 0, this, read_buffer, NULL, NULL);
+        int ret = avformat_open_input(&ifc, "nothing", NULL, NULL);
+        if (ret != 0) {
+            char tmp[1024]={0};
+            av_strerror(ret, tmp, 1024);
+            Log::error("Could not open input file: %d(%s)", ret, tmp);
+            goto end;
+        }
+        ret = avformat_find_stream_info(ifc, NULL);
+        if (ret < 0) {
+            char tmp[1024]={0};
+            av_strerror(ret, tmp, 1024);
+            Log::error("Failed to retrieve input stream information %d(%s)", ret, tmp);
+            goto end;
+        }
+        Log::debug("show input format info");
+        av_dump_format(ifc, 0, NULL, 0);
+
+        //输出 自定义回调
+        AVOutputFormat *ofmt = NULL;
+        ret = avformat_alloc_output_context2(&ofc, NULL, "flv", NULL);
+        if (!ofc) {
+            Log::error("Could not create output context\n");
+            ret = AVERROR_UNKNOWN;
+            goto end;
+        }
+        ofmt = ofc->oformat;
+
+        unsigned char* outbuffer=(unsigned char*)av_malloc(65536);
+        AVIOContext *avio_out =avio_alloc_context(outbuffer, 65536,1,this,NULL,write_buffer,NULL);  
+        ofc->pb = avio_out; 
+        ofc->flags = AVFMT_FLAG_CUSTOM_IO;
+        ofmt->flags |= AVFMT_NOFILE;
+
+        //根据输入流信息生成输出流信息
+        int in_video_index = -1, in_audio_index = -1, in_subtitle_index = -1;
+        int out_video_index = -1, out_audio_index = -1, out_subtitle_index = -1;
+        for (unsigned int i = 0, j = 0; i < ifc->nb_streams; i++) {
+            AVStream *is = ifc->streams[i];
+            if (is->codecpar->codec_type == AVMEDIA_TYPE_VIDEO){
+                in_video_index = i;
+                out_video_index = j++;
+                //} else if (is->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+                //    in_audio_index = i;
+                //    out_audio_index = j++;
+                //} else if (is->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE) {
+                //    in_subtitle_index = i;
+                //    out_subtitle_index = j++;
             } else {
-                // 视频源依然连接，延时20秒再销毁对象，以便短时间内有新请求能快速播放
-                uv_timer_init(g_uv_loop, &m_uvTimerStop);
-                m_uvTimerStop.data = this;
-                uv_timer_start(&m_uvTimerStop, stop_timer_cb, 20000, 0);
+                continue;
+            }
+
+            AVStream *os = avformat_new_stream(ofc, NULL);
+            if (!os) {
+                Log::error("Failed allocating output stream\n");
+                ret = AVERROR_UNKNOWN;
+                goto end;
+            }
+
+            ret = avcodec_parameters_copy(os->codecpar, is->codecpar);
+            if (ret < 0) {
+                Log::error("Failed to copy codec parameters\n");
+                goto end;
             }
         }
+        Log::debug("show output format info");
+        av_dump_format(ofc, 0, NULL, 1);
+
+        //Log::debug("index:%d %d %d %d",in_video_index, in_audio_index, out_video_index, out_audio_index);
+
+        ret = avformat_write_header(ofc, NULL);
+        if (ret < 0) {
+            char tmp[1024]={0};
+            av_strerror(ret, tmp, 1024);
+            Log::error("Error avformat_write_header %d:%s \n", ret, tmp);
+            goto end;
+        }
+
+        bool first = true;
+        while (!m_bStop) {
+            AVStream *in_stream, *out_stream;
+            AVPacket pkt;
+            av_init_packet(&pkt);
+            ret = av_read_frame(ifc, &pkt);
+            if (ret < 0)
+                break;
+            //Log::debug("read_index %d",pkt.stream_index);
+            in_stream  = ifc->streams[pkt.stream_index];
+            if (pkt.stream_index == in_video_index) {
+                //Log::debug("video dts %d", pkt.dts);
+                //Log::debug("video pts %d", pkt.pts);
+                pkt.stream_index = out_video_index;
+                out_stream = ofc->streams[pkt.stream_index];
+                /* copy packet */
+                if(first){
+                    pkt.pts = 0;
+                    pkt.dts = 0;
+                    first = false;
+                } else {
+                    pkt.pts = av_rescale_q_rnd(pkt.pts, in_stream->time_base, out_stream->time_base, AV_ROUND_NEAR_INF/*|AV_ROUND_PASS_MINMAX*/);
+                    pkt.dts = av_rescale_q_rnd(pkt.dts, in_stream->time_base, out_stream->time_base, AV_ROUND_NEAR_INF/*|AV_ROUND_PASS_MINMAX*/);
+                }
+                pkt.duration = av_rescale_q(pkt.duration, in_stream->time_base, out_stream->time_base);
+                pkt.pos = -1;
+                //Log::debug("video2 dts %d", pkt.dts);
+                //Log::debug("video2 pts %d", pkt.pts);
+
+                int wret = av_interleaved_write_frame(ofc, &pkt);
+                if (wret < 0) {
+                    char tmp[1024]={0};
+                    av_strerror(ret, tmp, 1024);
+                    Log::error("video error muxing packet %d:%s \n", ret, tmp);
+                    //break;
+                }
+            } //else if (pkt.stream_index == in_audio_index) {
+            //    //Log::debug("audio dts %d pts %d", pkt.dts, pkt.pts);
+            //    pkt.stream_index = out_audio_index;
+            //    out_stream = ofc->streams[pkt.stream_index];
+            //    /* copy packet */
+            //    pkt.pts = av_rescale_q_rnd(pkt.pts, in_stream->time_base, out_stream->time_base, AV_ROUND_NEAR_INF/*|AV_ROUND_PASS_MINMAX*/);
+            //    pkt.dts = av_rescale_q_rnd(pkt.dts, in_stream->time_base, out_stream->time_base, AV_ROUND_NEAR_INF/*|AV_ROUND_PASS_MINMAX*/);
+            //    pkt.duration = av_rescale_q(pkt.duration, in_stream->time_base, out_stream->time_base);
+            //    pkt.pos = -1;
+            //    //Log::debug("audio2 dts %d pts %d", pkt.dts, pkt.pts);
+
+            //    int wret = av_interleaved_write_frame(ofc, &pkt);
+            //    if (wret < 0) {
+            //        char tmp[1024]={0};
+            //        av_strerror(ret, tmp, 1024);
+            //        Log::error("audio error muxing packet %d:%s \n", ret, tmp);
+            //        //break;
+            //    }
+            //}
+            av_packet_unref(&pkt);
+        }
+
+        av_write_trailer(ofc);
+end:
+        /** 关闭输入 */
+        avformat_close_input(&ifc);
+
+        /* 关闭输出 */
+        if (ofc && !(ofmt->flags & AVFMT_NOFILE))
+            avio_closep(&ofc->pb);
+        avformat_free_context(ofc);
+
+        /** 返回码 */
+        if (ret < 0 /*&& ret != AVERROR_EOF*/) {
+            char tmp[AV_ERROR_MAX_STRING_SIZE]={0};
+            av_make_error_string(tmp,AV_ERROR_MAX_STRING_SIZE,ret);
+            Log::error("Error occurred: %s\n", tmp);
+            stop();
+            return false;
+        }
+        Log::debug("client stop, delete live worker");
+        delete this;
         return true;
+    }
+
+    int CLiveWorker::ReadInput(uint8_t *buf, int buf_size)
+    {
+        if(m_nRtpRead >= m_nRtpLen){
+            m_nRtpLen = m_pRtp->GetPacket(&m_pRtpBuff, &m_nRtpBuffLen);
+            m_nRtpRead = 0;
+            if(m_nRtpLen == 0)
+                return 0;
+        }
+        int nDataSize = m_nRtpLen - m_nRtpRead;
+        if(nDataSize > buf_size){
+            memcpy(buf, m_pRtpBuff+m_nRtpRead, buf_size);
+            m_nRtpRead += buf_size;
+            return buf_size;
+        } else {
+            memcpy(buf, m_pRtpBuff+m_nRtpRead, nDataSize);
+            m_nRtpRead += nDataSize;
+            return nDataSize;
+        }
+    }
+
+    void CLiveWorker::StartListen()
+    {
+        m_pRtp->StartListen();
     }
 
 	void CLiveWorker::Clear2Stop() {
-		if(m_pFlvPssList == NULL && m_pH264PssList == NULL && m_pMP4PssList == NULL) {
-			Log::debug("need close live stream");
-            //首先从map中移走对象
-            DelLiveWorker(m_strCode);
-		}
+        Log::debug("need close live stream");
+        if(m_bStop) {
+            Log::debug("already stop, delete live worker");
+            delete this;
+        } else {
+            Log::debug("need stop ffmpeg");
+            m_bStop = true;
+        }
 	}
 
-    void CLiveWorker::push_flv_frame(FLV_FRAG_TYPE eType, char* pBuff, int nLen)
+    void CLiveWorker::push_flv_frame(char* pBuff, int nLen)
     {
-        if (eType == FLV_HEAD) {
-            m_stFlvHead.pBuff = pBuff;
-            m_stFlvHead.nLen = nLen;
-            Log::debug("flv head ok");
-        } else {
-            //内存数据保存至ring-buff
-            int n = (int)lws_ring_get_count_free_elements(m_pFlvRing);
-            if (!n) {
-                cull_lagging_clients(media_flv);
-                n = (int)lws_ring_get_count_free_elements(m_pFlvRing);
-            }
-            Log::debug("LWS_CALLBACK_RECEIVE: free space %d\n", n);
-            if (!n)
-                return;
-
-            // 将数据保存在ring buff
-            char* pSaveBuff = (char*)malloc(nLen + LWS_PRE);
-            memcpy(pSaveBuff + LWS_PRE, pBuff, nLen);
-            LIVE_BUFF newTag = {pSaveBuff, nLen};
-            if (!lws_ring_insert(m_pFlvRing, &newTag, 1)) {
-                destroy_ring_node(&newTag);
-                Log::error("dropping!");
-                return;
-            }
-
-            //向所有播放链接发送数据
-            lws_start_foreach_llp(pss_http_ws_live **, ppss, m_pFlvPssList) {
-                lws_callback_on_writable((*ppss)->wsi);
-            } lws_end_foreach_llp(ppss, pss_next);
-        }    
-    }
-
-    void CLiveWorker::push_h264_stream(char* pBuff, int nLen)
-    {
-        int n = (int)lws_ring_get_count_free_elements(m_pH264Ring);
-        if (!n) {
-            cull_lagging_clients(media_h264);
-            n = (int)lws_ring_get_count_free_elements(m_pH264Ring);
-        }
-        Log::debug("h264 ring free space %d\n", n);
+        //内存数据保存至ring-buff
+        int n = (int)lws_ring_get_count_free_elements(m_pRing);
+        Log::debug("LWS_CALLBACK_RECEIVE: free space %d\n", n);
         if (!n)
             return;
 
@@ -311,53 +442,14 @@ namespace HttpWsServer
         char* pSaveBuff = (char*)malloc(nLen + LWS_PRE);
         memcpy(pSaveBuff + LWS_PRE, pBuff, nLen);
         LIVE_BUFF newTag = {pSaveBuff, nLen};
-        if (!lws_ring_insert(m_pH264Ring, &newTag, 1)) {
+        if (!lws_ring_insert(m_pRing, &newTag, 1)) {
             destroy_ring_node(&newTag);
             Log::error("dropping!");
             return;
         }
 
-        //向所有播放链接发送数据
-        lws_start_foreach_llp(pss_http_ws_live **, ppss, m_pH264PssList) {
-            lws_callback_on_writable((*ppss)->wsi);
-        } lws_end_foreach_llp(ppss, pss_next);
-    }
-
-    void CLiveWorker::push_ts_stream(char* pBuff, int nLen)
-    {
-    }
-
-    void CLiveWorker::push_mp4_stream(MP4_FRAG_TYPE eType, char* pBuff, int nLen)
-    {
-        if(eType == MP4_HEAD) {
-            m_stMP4Head.pBuff = pBuff;
-            m_stMP4Head.nLen = nLen;
-            Log::debug("MP4 Head ok");
-        } else {
-            int n = (int)lws_ring_get_count_free_elements(m_pMP4Ring);
-            if (!n) {
-                cull_lagging_clients(media_mp4);
-                n = (int)lws_ring_get_count_free_elements(m_pMP4Ring);
-            }
-            Log::debug("mp4 ring free space %d\n", n);
-            if (!n)
-                return;
-
-            // 将数据保存在ring buff
-            char* pSaveBuff = (char*)malloc(nLen + LWS_PRE);
-            memcpy(pSaveBuff + LWS_PRE, pBuff, nLen);
-            LIVE_BUFF newTag = {pSaveBuff, nLen};
-            if (!lws_ring_insert(m_pMP4Ring, &newTag, 1)) {
-                destroy_ring_node(&newTag);
-                Log::error("dropping!");
-                return;
-            }
-
-            //向所有播放链接发送数据
-            lws_start_foreach_llp(pss_http_ws_live **, ppss, m_pMP4PssList) {
-                lws_callback_on_writable((*ppss)->wsi);
-            } lws_end_foreach_llp(ppss, pss_next);
-        }
+        //向客户端发送数据
+        lws_callback_on_writable(m_pPssList->wsi);
     }
 
     void CLiveWorker::stop()
@@ -365,52 +457,15 @@ namespace HttpWsServer
         //视频源没有数据并超时
         Log::debug("no data recived any more, stopped");
         //状态改变为超时，此时前端全部断开，不需要延时，直接销毁
-        m_bOver = true;
 
-        //断开所有客户端连接
-        lws_start_foreach_llp_safe(pss_http_ws_live **, ppss, m_pFlvPssList, pss_next) {
-            lws_set_timeout((*ppss)->wsi, PENDING_TIMEOUT_CLOSE_SEND, LWS_TO_KILL_ASYNC);
-        } lws_end_foreach_llp_safe(ppss);
-        lws_start_foreach_llp_safe(pss_http_ws_live **, ppss, m_pH264PssList, pss_next) {
-            lws_set_timeout((*ppss)->wsi, PENDING_TIMEOUT_CLOSE_SEND, LWS_TO_KILL_ASYNC);
-        } lws_end_foreach_llp_safe(ppss);
-        lws_start_foreach_llp_safe(pss_http_ws_live **, ppss, m_pMP4PssList, pss_next) {
-            lws_set_timeout((*ppss)->wsi, PENDING_TIMEOUT_CLOSE_SEND, LWS_TO_KILL_ASYNC);
-        } lws_end_foreach_llp_safe(ppss);
-    }
-
-    LIVE_BUFF CLiveWorker::GetFlvHeader()
-    {
-        return m_stFlvHead;
+        //断开客户端连接
+        lws_set_timeout(m_pPssList->wsi, PENDING_TIMEOUT_CLOSE_SEND, LWS_TO_KILL_ASYNC);
     }
 
     LIVE_BUFF CLiveWorker::GetFlvVideo(uint32_t *tail)
     {
         LIVE_BUFF ret = {nullptr,0};
-        LIVE_BUFF* tag = (LIVE_BUFF*)lws_ring_get_element(m_pFlvRing, tail);
-        if(tag) ret = *tag;
-
-        return ret;
-    }
-
-    LIVE_BUFF CLiveWorker::GetH264Video(uint32_t *tail)
-    {
-        LIVE_BUFF ret = {nullptr,0};
-        LIVE_BUFF* tag = (LIVE_BUFF*)lws_ring_get_element(m_pH264Ring, tail);
-        if(tag) ret = *tag;
-
-        return ret;
-    }
-
-    LIVE_BUFF CLiveWorker::GetMp4Header()
-    {
-        return m_stMP4Head;
-    }
-
-    LIVE_BUFF CLiveWorker::GetMp4Video(uint32_t *tail)
-    {
-        LIVE_BUFF ret = {nullptr,0};
-        LIVE_BUFF* tag = (LIVE_BUFF*)lws_ring_get_element(m_pMP4Ring, tail);
+        LIVE_BUFF* tag = (LIVE_BUFF*)lws_ring_get_element(m_pRing, tail);
         if(tag) ret = *tag;
 
         return ret;
@@ -418,20 +473,8 @@ namespace HttpWsServer
 
     void CLiveWorker::NextWork(pss_http_ws_live* pss)
     {
-        struct lws_ring *ring;
-        pss_http_ws_live* pssList;
-        if(pss->media_type == media_flv) {
-            ring = m_pFlvRing;
-            pssList = m_pFlvPssList;
-        } else if(pss->media_type == media_h264){
-            ring = m_pH264Ring;
-            pssList = m_pH264PssList;
-        } else if (pss->media_type == media_mp4) {
-            ring = m_pMP4Ring;
-            pssList = m_pMP4PssList;
-        } else {
-            return;
-        }
+        struct lws_ring *ring = m_pRing;
+        pss_http_ws_live* pssList = m_pPssList;
 
         //Log::debug("this work tail:%d\r\n", pss->tail);
         lws_ring_consume_and_update_oldest_tail(
@@ -454,53 +497,30 @@ namespace HttpWsServer
     string CLiveWorker::GetClientInfo()
     {
         stringstream ss;
-        lws_start_foreach_llp(pss_http_ws_live **, ppss, m_pFlvPssList) {
-            ss << "{\"DeviceID\":\"" << m_strCode << "\",\"Connect\":\"";
-            if((*ppss)->isWs){
-                ss << "web socket";
-            } else {
-                ss << "Http";
-            }
-            ss << "\",\"Media\":\"flv\",\"ClientIP\":\"" 
-                << (*ppss)->clientIP << "\"},";
-        } lws_end_foreach_llp(ppss, pss_next);
-
-        lws_start_foreach_llp(pss_http_ws_live **, ppss, m_pH264PssList) {
-            ss << "{\"DeviceID\":\"" << m_strCode << "\",\"Connect\":\"";
-            if((*ppss)->isWs){
-                ss << "web socket";
-            } else {
-                ss << "Http";
-            }
-            ss << "\",\"Media\":\"h264\",\"ClientIP\":\"" 
-                << (*ppss)->clientIP << "\"},";
-        } lws_end_foreach_llp(ppss, pss_next);
-
-        lws_start_foreach_llp(pss_http_ws_live **, ppss, m_pMP4PssList) {
-            ss << "{\"DeviceID\":\"" << m_strCode << "\",\"Connect\":\"";
-            if((*ppss)->isWs){
-                ss << "web socket";
-            } else {
-                ss << "Http";
-            }
-            ss << "\",\"Media\":\"mp4\",\"ClientIP\":\"" 
-                << (*ppss)->clientIP << "\"},";
-        } lws_end_foreach_llp(ppss, pss_next);
+        ss << "{\"DeviceID\":\"" << m_strCode << "\",\"Connect\":\"";
+        if(m_pPssList->isWs){
+            ss << "web socket";
+        } else {
+            ss << "Http";
+        }
+        ss << "\",\"Media\":\"";
+        if(m_pPssList->media_type == media_flv)
+            ss << "flv";
+        else if(m_pPssList->media_type == media_mp4)
+            ss << "mp4";
+        else if(m_pPssList->media_type == media_h264)
+            ss << "h264";
+        ss << "\",\"ClientIP\":\"" 
+           << m_pPssList->clientIP << "\"},";
 
         return ss.str();
     }
 
     void CLiveWorker::cull_lagging_clients(MediaType type)
     {
-        struct lws_ring *ring;
-        pss_http_ws_live* pssList;
-        if(type == media_flv) {
-            ring = m_pFlvRing;
-            pssList = m_pFlvPssList;
-        } else {
-            ring = m_pH264Ring;
-            pssList = m_pH264PssList;
-        }
+        struct lws_ring *ring = m_pRing;
+        pss_http_ws_live* pssList = m_pPssList;
+  
 
         uint32_t oldest_tail = lws_ring_get_oldest_tail(ring);
         pss_http_ws_live *old_pss = NULL;
@@ -534,73 +554,30 @@ namespace HttpWsServer
 
     //////////////////////////////////////////////////////////////////////////
 
-    void ipc_init(){
-        /** 进程间通信 */
-        int ret = uv_ipc_client(&h, "relay_live", NULL, "liveDest", on_ipc_recv, NULL);
-        if(ret < 0) {
-            printf("ipc server err: %s\n", uv_ipc_strerr(ret));
-        }
-    }
-
-    CLiveWorker* CreatLiveWorker(string strCode)
+    CLiveWorker* CreatLiveWorker(string strCode, pss_http_ws_live *pss)
     {
-        Log::debug("CreatFlvBuffer begin");
+        Log::debug("CreatLiveWorker begin");
         int rtpPort = GetRtpPort();
         if(rtpPort < 0) {
             Log::error("play failed %s, no rtp port",strCode.c_str());
             return nullptr;
         }
 
-        CLiveWorker* pNew = new CLiveWorker(strCode, rtpPort);
-
-        //if(!SipInstance::RealPlay(strCode, m_strRtpIP,  rtpPort))
-        if(real_play(strCode, m_strRtpIP,  rtpPort))
+        CLiveWorker* pNew = new CLiveWorker(strCode, rtpPort, pss);
         {
-            uv_thread_t tid;
-            uv_thread_create(&tid, live_worker_destory_thread, pNew);
+            MutexLock lock(&m_cs);
+            m_workerMap.insert(make_pair(rtpPort, pNew));
+        }
+        //if(!SipInstance::RealPlay(strCode, m_strRtpIP,  rtpPort))
+        if(!pNew->RealPlayAsync(rtpPort))
+        {
+            pNew->stop();
             Log::error("play failed %s",strCode.c_str());
             return nullptr;
         }
         Log::debug("RealPlay ok: %s",strCode.c_str());
 
-        MutexLock lock(&m_cs);
-        m_workerMap.insert(make_pair(strCode, pNew));
-
         return pNew;
-    }
-
-    CLiveWorker* GetLiveWorker(string strCode)
-    {
-        //Log::debug("GetWorker begin");
-
-        MutexLock lock(&m_cs);
-        auto itFind = m_workerMap.find(strCode);
-        if (itFind != m_workerMap.end())
-        {
-            // 已经存在
-            return itFind->second;
-        }
-
-        //Log::error("GetWorker failed: %s",strCode.c_str());
-        return nullptr;
-    }
-
-    bool DelLiveWorker(string strCode)
-    {
-        MutexLock lock(&m_cs);
-        auto itFind = m_workerMap.find(strCode);
-        if (itFind != m_workerMap.end())
-        {
-            // CLiveWorker析构中删除m_pLive比较耗时，会阻塞event loop，因此使用线程销毁对象。
-            uv_thread_t tid;
-            uv_thread_create(&tid, live_worker_destory_thread, itFind->second);
-
-            m_workerMap.erase(itFind);
-            return true;
-        }
-
-        Log::error("dosn't find worker object");
-        return false;
     }
 
     string GetClientsInfo() 
