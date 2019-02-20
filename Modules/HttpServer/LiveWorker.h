@@ -20,6 +20,7 @@ namespace HttpWsServer
         bool RealPlayAsync(int rtpPort);
         /** 播放成功回调 */
         void RealPlaySuccess();
+		void RealPlayFailed();
         /** 通知播放进程关闭 */
         void StopAsync();
         /** ffmpeg解编码线程 */

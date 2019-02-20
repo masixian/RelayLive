@@ -64,6 +64,14 @@ bool SipInstance::StopPlay(string rtpPort)
     return true;
 }
 
+bool SipInstance::StopPlayAll()
+{
+    Log::debug("stop all");
+    CSipCall::StopSipCallAll();
+
+    return true;
+}
+
 bool SipInstance::RecordPlay(string strDev, string startTime, string endTime)
 {
     Log::debug("start SipInstance::RealPlay strDev:%s",strDev.c_str());

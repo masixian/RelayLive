@@ -121,6 +121,7 @@ void CRtpClient::TimeOut()
 int CRtpClient::GetPacket(char** buf, int *buf_len)
 {
     uv_buf_t* e = (uv_buf_t*)lws_ring_get_element(m_pRtpRing, NULL);
+	if(!e) return 0;
     int ret = e->len;
     if(e->len > *buf_len) {
         *buf = (char*)realloc(*buf, e->len);

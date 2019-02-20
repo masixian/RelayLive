@@ -34,6 +34,11 @@ public:
     static bool StopPlay(string rtpPort);
 
     /**
+     * 关闭所有播放
+     */
+    static bool StopPlayAll();
+
+    /**
      * 开启一个历史视频播放
      * @param[in] strDev 设备编码
      * @param startTime 开始时间

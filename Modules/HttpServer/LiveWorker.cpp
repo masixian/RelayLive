@@ -72,7 +72,7 @@ namespace HttpWsServer
                 if (!ret) {
                     itFind->second->RealPlaySuccess();
                 } else {
-                    itFind->second->stop();
+                    itFind->second->RealPlayFailed();
                 }
             }
         }
@@ -214,10 +214,20 @@ namespace HttpWsServer
             uv_timer_stop(&m_uvTimerPlayTimeOut);
             uv_close((uv_handle_t*)&m_uvTimerPlayTimeOut, NULL);
         }
-
+		m_pRtp->StartListen();
         uv_thread_t tid;
         uv_thread_create(&tid, real_play, (void*)this);
     }
+
+	void CLiveWorker::RealPlayFailed()
+	{
+		//成功将定时器关掉即可
+        if(uv_is_active((const uv_handle_t*)&m_uvTimerPlayTimeOut)) {
+            uv_timer_stop(&m_uvTimerPlayTimeOut);
+            uv_close((uv_handle_t*)&m_uvTimerPlayTimeOut, NULL);
+        }
+		stop();
+	}
 
     void CLiveWorker::StopAsync()
     {
@@ -231,18 +241,32 @@ namespace HttpWsServer
     bool CLiveWorker::Play()
     {
         AVFormatContext *ifc = NULL;
+        AVInputFormat *ifmt = NULL;
         AVFormatContext *ofc = NULL;
 
-        ifc = avformat_alloc_context();
+        //流读取
         unsigned char * iobuffer=(unsigned char *)av_malloc(FFMPEG_INPUT_SIZE);
-        ifc->pb =avio_alloc_context(iobuffer, FFMPEG_INPUT_SIZE, 0, this, read_buffer, NULL, NULL);
-        int ret = avformat_open_input(&ifc, "nothing", NULL, NULL);
+        AVIOContext *pb = avio_alloc_context(iobuffer, FFMPEG_INPUT_SIZE, 0, this, read_buffer, NULL, NULL);
+        //探测流格式
+        int ret = av_probe_input_buffer(pb, &ifmt, "", NULL, 0, 0);
+        if (ret != 0) {
+            char tmp[1024]={0};
+            av_strerror(ret, tmp, 1024);
+            Log::error("av_probe_input_buffer failed: %d(%s)", ret, tmp);
+            goto end;
+        }
+        Log::debug("av_probe_input_buffer  %s[%s]", ifmt->name, ifmt->long_name);
+        //打开流
+        ifc = avformat_alloc_context();
+        ifc->pb = pb;
+        ret = avformat_open_input(&ifc, "", ifmt, NULL);
         if (ret != 0) {
             char tmp[1024]={0};
             av_strerror(ret, tmp, 1024);
             Log::error("Could not open input file: %d(%s)", ret, tmp);
             goto end;
         }
+        //解析流信息
         ret = avformat_find_stream_info(ifc, NULL);
         if (ret < 0) {
             char tmp[1024]={0};

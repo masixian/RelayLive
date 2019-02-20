@@ -103,6 +103,19 @@ bool CSipCall::StopSipCall(string strRtpPort)
     return true;
 }
 
+bool CSipCall::StopSipCallAll()
+{
+    MutexLock lock(&m_csGlobalCall);
+    for(auto devCall : m_mapDeviceCall)
+    {
+        delete devCall.second;
+    }
+    m_mapDeviceCall.clear();
+    m_mapGlobalCall.clear();
+    Log::debug("Stopped call all");
+    return true;
+}
+
 bool CSipCall::SendInvite()
 {
     PlatFormInfo* pPlatform = DeviceMgr::GetPlatformInfo();

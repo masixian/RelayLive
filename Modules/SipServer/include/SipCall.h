@@ -28,6 +28,8 @@ public:
      */
     static bool StopSipCall(string strRtpPort);
 
+    static bool StopSipCallAll();
+
     /**
      * ทขหอสำฦตั๛ว๋
      */
