@@ -48,6 +48,7 @@
     <ClInclude Include="..\..\Common\avformat\rtsp.h" />
     <ClInclude Include="..\..\Common\avformat\sdp.h" />
     <ClInclude Include="..\..\Common\avformat\ts.h" />
+    <ClInclude Include="ffmpeg.h" />
     <ClInclude Include="LiveChannel.h" />
     <ClInclude Include="LiveClient.h" />
     <ClInclude Include="LiveIpc.h" />

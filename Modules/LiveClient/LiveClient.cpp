@@ -42,6 +42,9 @@ namespace LiveClient
             g_stream_type = STREAM_PS;
         else if(g_nRtpStreamType == 1)
             g_stream_type = STREAM_H264;
+
+#ifdef USE_FFMPEG
+#endif
     }
 
     string GetClientsInfo() 

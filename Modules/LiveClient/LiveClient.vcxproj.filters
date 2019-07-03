@@ -128,5 +128,8 @@
     <ClInclude Include="LiveChannel.h">
       <Filter>src</Filter>
     </ClInclude>
+    <ClInclude Include="ffmpeg.h">
+      <Filter>src</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>

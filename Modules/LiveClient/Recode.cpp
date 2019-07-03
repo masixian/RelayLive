@@ -5,26 +5,7 @@
 #include "es.h"
 #include "h264.h"
 #include "flv.h"
-
-extern "C"
-{
-#define __STDC_FORMAT_MACROS
-#define snprintf  _snprintf
-//#include "libavdevice/avdevice.h"
-#include "libavcodec/avcodec.h"  
-//#include "libavformat/avformat.h"  
-#include "libswscale/swscale.h"  
-#include "libavutil/imgutils.h"
-//#include "libavutil/timestamp.h"
-}
-#pragma comment(lib,"avcodec.lib")
-//#pragma comment(lib,"avdevice.lib")
-//#pragma comment(lib,"avfilter.lib")
-//#pragma comment(lib,"avformat.lib")
-#pragma comment(lib,"avutil.lib")
-#pragma comment(lib,"postproc.lib")
-//#pragma comment(lib,"swresample.lib")
-#pragma comment(lib,"swscale.lib")
+#include "ffmpeg.h"
 
 namespace LiveClient
 {
