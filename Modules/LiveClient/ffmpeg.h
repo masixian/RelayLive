@@ -8,7 +8,7 @@ extern "C"
 #define snprintf  _snprintf
 //#include "libavdevice/avdevice.h"
 #include "libavcodec/avcodec.h"  
-//#include "libavformat/avformat.h"  
+#include "libavformat/avformat.h"  
 #include "libswscale/swscale.h"  
 #include "libavutil/imgutils.h"
 //#include "libavutil/timestamp.h"

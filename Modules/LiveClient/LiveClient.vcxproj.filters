@@ -66,6 +66,9 @@
     <ClCompile Include="LiveChannel.cpp">
       <Filter>src</Filter>
     </ClCompile>
+    <ClCompile Include="LocalRtsp.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\Common\avformat\es.h">
@@ -129,6 +132,9 @@
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="ffmpeg.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="LocalRtsp.h">
       <Filter>src</Filter>
     </ClInclude>
   </ItemGroup>

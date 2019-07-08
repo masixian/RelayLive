@@ -40,17 +40,17 @@ namespace HttpWsServer
         m_pRing  = lws_ring_create(sizeof(AV_BUFF), 100, destroy_ring_node);
 
         if (t == h264_handle) {
-            CH264 *tmp = new CH264(AVCallback, this);
-            tmp->SetNodelay(g_nNodelay);
-            m_pFormat = tmp;
+            //CH264 *tmp = new CH264(AVCallback, this);
+            //tmp->SetNodelay(g_nNodelay);
+            //m_pFormat = tmp;
         } else if(t == flv_handle) {
-            CFlv *tmp = new CFlv(AVCallback, this);
-            tmp->SetNodelay(g_nNodelay);
-            m_pFormat = tmp;
+            //CFlv *tmp = new CFlv(AVCallback, this);
+            //tmp->SetNodelay(g_nNodelay);
+            //m_pFormat = tmp;
         } else if(t == fmp4_handle){
-            CMP4 *tmp = new CMP4(AVCallback, this);
-            tmp->SetNodelay(g_nNodelay);
-            m_pFormat = tmp;
+            //CMP4 *tmp = new CMP4(AVCallback, this);
+            //tmp->SetNodelay(g_nNodelay);
+            //m_pFormat = tmp;
         }
 
         m_SocketBuff.eType = AV_TYPE::NONE;
@@ -124,16 +124,17 @@ namespace HttpWsServer
 
     void CHttpWorker::push_video_stream(AV_BUFF buff)
     {
-        if (m_eHandleType == h264_handle) {
-            CH264 *tmp = (CH264 *)m_pFormat;
-            tmp->Code(buff);
-        } else if(m_eHandleType == flv_handle) {
-            CFlv *tmp = (CFlv *)m_pFormat;
-            tmp->Code(buff);
-        } else if(m_eHandleType == fmp4_handle){
-            CMP4 *tmp = (CMP4 *)m_pFormat;
-            tmp->Code(buff);
-        }
+        MediaCb(buff);
+        //if (m_eHandleType == h264_handle) {
+        //    CH264 *tmp = (CH264 *)m_pFormat;
+        //    tmp->Code(buff);
+        //} else if(m_eHandleType == flv_handle) {
+        //    CFlv *tmp = (CFlv *)m_pFormat;
+        //    tmp->Code(buff);
+        //} else if(m_eHandleType == fmp4_handle){
+        //    CMP4 *tmp = (CMP4 *)m_pFormat;
+        //    tmp->Code(buff);
+        //}
     }
 
     void CHttpWorker::stop()

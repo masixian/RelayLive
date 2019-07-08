@@ -28,6 +28,7 @@
     <ClCompile Include="LiveIpc.cpp" />
     <ClCompile Include="liveReceiver.cpp" />
     <ClCompile Include="LiveWorker.cpp" />
+    <ClCompile Include="LocalRtsp.cpp" />
     <ClCompile Include="Recode.cpp" />
     <ClCompile Include="stdafx.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Create</PrecompiledHeader>
@@ -54,6 +55,7 @@
     <ClInclude Include="LiveIpc.h" />
     <ClInclude Include="liveReceiver.h" />
     <ClInclude Include="LiveWorker.h" />
+    <ClInclude Include="LocalRtsp.h" />
     <ClInclude Include="Recode.h" />
     <ClInclude Include="stdafx.h" />
   </ItemGroup>

@@ -5,6 +5,8 @@
 #include "liveReceiver.h"
 #include "LiveChannel.h"
 #include "LiveIpc.h"
+#include "bnf.h"
+#include "LocalRtsp.h"
 
 namespace LiveClient
 {
@@ -19,7 +21,7 @@ namespace LiveClient
     extern vector<int>     m_vecRtpPort;     //< RTP可用端口，使用时从中取出，使用结束重新放入
     //extern CriticalSection m_csRTP;          //< RTP端口锁
 
-    static map<string,CLiveWorker*>  m_workerMap;
+    static map<int,CLiveWorker*>  m_workerMap;
     //static CriticalSection           m_cs;
 
     static int GetRtpPort()
@@ -91,34 +93,31 @@ namespace LiveClient
         }
 
         Log::debug("RealPlay ok: %s",strCode.c_str());
-        CLiveWorker* pNew = new CLiveWorker(strCode, rtpPort, sdp);
+
+        static int ID = 0;
+        ID++;
+        CLiveWorker* pNew = new CLiveWorker(strCode, rtpPort, sdp, ID);
 
         //MutexLock lock(&m_cs);
-        m_workerMap.insert(make_pair(strCode, pNew));
+        m_workerMap.insert(make_pair(ID, pNew));
 
         return pNew;
     }
 
-    CLiveWorker* GetLiveWorker(string strCode)
+    CLiveWorker* GetLiveWorker(uint32_t ID)
     {
-        //Log::debug("GetWorker begin");
-
-        //MutexLock lock(&m_cs);
-        auto itFind = m_workerMap.find(strCode);
+        auto itFind = m_workerMap.find(ID);
         if (itFind != m_workerMap.end())
         {
             // 已经存在
             return itFind->second;
         }
-
-        //Log::error("GetWorker failed: %s",strCode.c_str());
         return nullptr;
     }
 
-    bool DelLiveWorker(string strCode)
+    bool DelLiveWorker(uint32_t ID)
     {
-        //MutexLock lock(&m_cs);
-        auto itFind = m_workerMap.find(strCode);
+        auto itFind = m_workerMap.find(ID);
         if (itFind != m_workerMap.end())
         {
             // CLiveWorker析构中删除m_pLive比较耗时，会阻塞event loop，因此使用线程销毁对象。
@@ -128,8 +127,6 @@ namespace LiveClient
             m_workerMap.erase(itFind);
             return true;
         }
-
-        Log::error("dosn't find worker object");
         return false;
     }
 
@@ -158,40 +155,42 @@ namespace LiveClient
 
     static void H264DecodeCb(AV_BUFF buff, void* user) {
         CLiveWorker* live = (CLiveWorker*)user;
-        live->ReceiveYUV(buff);
+        //live->ReceiveYUV(buff);
     }
 
-    CLiveWorker::CLiveWorker(string strCode, int rtpPort, string sdp)
+    CLiveWorker::CLiveWorker(string strCode, uint32_t rtpPort, string sdp, uint32_t ID)
         : m_strCode(strCode)
         , m_nPort(rtpPort)
         , m_strSDP(sdp)
+        , m_nID(ID)
         , m_nType(0)
-        , m_pReceiver(nullptr)
-        , m_pOrigin(nullptr)
-#ifdef USE_FFMPEG
-        , m_pDecoder(nullptr)
-#endif
         , m_bStop(false)
         , m_bOver(false)
     {
         //从sdp解析出视频源ip和端口
-        size_t t1,t2;
-        t1 = sdp.find("c=IN IP4 ");
-        t1 += 9;
-        t2 = sdp.find("\r\n", t1);
-        string rip = sdp.substr(t1, t2-t1);
-        t1 = sdp.find("m=video ");
-        t1 += 8;
-        t2 = sdp.find(" ", t1);
-        string rport = sdp.substr(t1, t2-t1);
-        int nport = stoi(rport);
+        bnf_t* sdp_bnf = create_bnf(sdp.c_str(), sdp.size());
+        char *sdp_line = NULL;
+        char remoteIP[25]={0};
+        int remotePort = 0;
+        while (bnf_line(sdp_bnf, &sdp_line)) {
+            if(sdp_line[0]=='c'){
+                sscanf(sdp_line, "c=IN IP4 %[^/\r\n]", remoteIP);
+            } else if(sdp_line[0]=='m') {
+                sscanf(sdp_line, "m=video %d %[^ \r\n]", &remotePort);
+            }
 
-        //启动监听
-        m_pReceiver = new CLiveReceiver(rtpPort, this);
-        m_pReceiver->m_strRemoteIP = rip;
-        m_pReceiver->m_nRemoteRTPPort = nport;
-        m_pReceiver->m_nRemoteRTCPPort = nport+1;
-        m_pReceiver->StartListen();
+            if(sdp_line[0]=='o' || sdp_line[0]=='s' || sdp_line[0]=='c' || sdp_line[0]=='t' || sdp_line[0]=='m'){
+                char tmp[256]={0};
+                sscanf(sdp_line, "%[^\r\n]", tmp);
+                m_vecSDP.push_back(tmp);
+            } else if(sdp_line[0]=='a' && !strncmp(sdp_line, "a=rtpmap:", 9)){
+                char tmp[256]={0};
+                sscanf(sdp_line, "%[^\r\n]", tmp);
+                m_vecSDP.push_back(tmp);
+            }
+        }
+
+        m_pRtspReq = new CLocalRtspRequest(ID, rtpPort);
     }
 
     CLiveWorker::~CLiveWorker()
@@ -200,85 +199,21 @@ namespace LiveClient
         if(LiveIpc::StopPlay(ssid)) {
             Log::error("stop play failed");
         }
-        SAFE_DELETE(m_pReceiver);
-        SAFE_DELETE(m_pOrigin);
-        MutexLock lock(&m_csChls);
-        for(auto it:m_mapChlEx){
-            SAFE_DELETE(it.second);
-        }
-        m_mapChlEx.clear();
+
         GiveBackRtpPort(m_nPort);
         Log::debug("CLiveWorker release");
     }
 
     bool CLiveWorker::AddHandle(ILiveHandle* h, HandleType t, int c)
     {
-        if(c == 0) {
-            // 原始通道
-            if(!m_pOrigin)
-                m_pOrigin = new CLiveChannel;
-            CHECK_POINT(m_pOrigin);
-            m_pOrigin->AddHandle(h, t);
-        } else {
-            // 扩展通道
-            MutexLock lock(&m_csChls);
-            auto fit = m_mapChlEx.find(c);
-            if(fit != m_mapChlEx.end()) {
-                fit->second->AddHandle(h, t);
-            } else {
-                CLiveChannel *nc = new CLiveChannel(c, 640, 480);
-                nc->AddHandle(h, t);
-#ifdef USE_FFMPEG
-                nc->SetDecoder(m_pDecoder);
-#endif
-                m_mapChlEx.insert(make_pair(c, nc));
-            }
-        }
-
-        //如果刚刚开启了结束定时器，需要将其关闭
-        if(uv_is_active((const uv_handle_t*)&m_uvTimerStop)) {
-            uv_timer_stop(&m_uvTimerStop);
-            uv_close((uv_handle_t*)&m_uvTimerStop, stop_timer_close_cb);
-        }
+        m_pHandle = h;
         return true;
     }
 
     bool CLiveWorker::RemoveHandle(ILiveHandle* h)
     {
         // 原始通道
-        bool bOriginEmpty = true;
-        if(m_pOrigin){
-            bOriginEmpty = m_pOrigin->RemoveHandle(h);
-            if(bOriginEmpty) {
-                SAFE_DELETE(m_pOrigin);
-            }
-        }
-
-        //扩展通道
-        bool bExEmpty = true;
-        MutexLock lock(&m_csChls);
-        for(auto it = m_mapChlEx.begin(); it != m_mapChlEx.end();) {
-            bool bEmpty = it->second->RemoveHandle(h);
-            if(bEmpty) {
-                delete it->second;
-                it = m_mapChlEx.erase(it);
-            } else {
-                it++;
-                bExEmpty = false;
-            }
-        }
-
-        if(bExEmpty && bOriginEmpty) {
-            if(m_bOver) {
-                // 视频源没有数据，超时，不需要延时
-                Clear2Stop();
-            } else {
-                // 视频源依然连接，延时N秒再销毁对象，以便短时间内有新请求能快速播放
-                uv_timer_init(g_uv_loop, &m_uvTimerStop);
-                m_uvTimerStop.data = this;
-                uv_timer_start(&m_uvTimerStop, stop_timer_cb, 5000, 0);
-            }
-        }
+        Clear2Stop();
         return true;
     }
 
@@ -287,17 +222,7 @@ namespace LiveClient
     }
 
 	void CLiveWorker::Clear2Stop() {
-        bool bOriginEmpty = !m_pOrigin || m_pOrigin->Empty();
-
-        MutexLock lock(&m_csChls);
-        bool bExEmpty = m_mapChlEx.empty();
-
-
-        if(bOriginEmpty && bExEmpty) {
-			Log::debug("need close live stream");
-            //首先从map中移走对象
-            DelLiveWorker(m_strCode);
-		}
+        DelLiveWorker(m_nID);
 	}
 
     void CLiveWorker::stop()
@@ -306,61 +231,21 @@ namespace LiveClient
         Log::debug("no data recived any more, stopped");
         //状态改变为超时，此时前端全部断开，不需要延时，直接销毁
         m_bOver = true;
-
-		if(m_pOrigin)
-			m_pOrigin->stop();
-        MutexLock lock(&m_csChls);
-        for(auto it:m_mapChlEx){
-            it.second->stop();
-        }
+        m_pHandle->stop();
     }
 
     vector<ClientInfo> CLiveWorker::GetClientInfo()
     {
 		vector<ClientInfo> ret;
-		if(m_pOrigin)
-			ret = m_pOrigin->GetClientInfo();
-        MutexLock lock(&m_csChls);
-        for(auto chl : m_mapChlEx){
-            vector<ClientInfo> tmp = chl.second->GetClientInfo();
-            ret.insert(ret.end(), tmp.begin(), tmp.end());
-        }
+        ClientInfo c = m_pHandle->get_clients_info();
+        ret.push_back(c);
 		return ret;
     }
 
     void CLiveWorker::ReceiveStream(AV_BUFF buff)
     {
-        if(buff.eType == AV_TYPE::RTP) {
-
-        } else if(buff.eType == AV_TYPE::H264_NALU) {
-            //原始通道，将h264码流转发过去
-            if(m_pOrigin){
-                m_pOrigin->ReceiveStream(buff);
-            }
-            //扩展通道，将码流解码成yuv再发送过去
-#ifdef USE_FFMPEG
-            MutexLock lock(&m_csChls);
-            if(!m_mapChlEx.empty()){
-                if(nullptr == m_pDecoder) {
-                    m_pDecoder = IDecoder::Create(H264DecodeCb,this);
-                    for(auto it:m_mapChlEx){
-                        it.second->SetDecoder(m_pDecoder);
-                    }
-                }
-                m_pDecoder->Decode(buff);
-            } else {
-                SAFE_DELETE(m_pDecoder);
-            }
-#endif
-        }
+        m_pHandle->push_video_stream(buff);
     }
 
-    void CLiveWorker::ReceiveYUV(AV_BUFF buff)
-    {
-        for (auto it:m_mapChlEx)
-        {
-            it.second->ReceiveStream(buff);
-        }
-    }
 
 }

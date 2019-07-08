@@ -44,6 +44,7 @@ namespace LiveClient
             g_stream_type = STREAM_H264;
 
 #ifdef USE_FFMPEG
+
 #endif
     }
 
@@ -69,9 +70,7 @@ namespace LiveClient
     }
 
     ILiveWorker* GetWorker(string strCode){
-        CLiveWorker* worker = GetLiveWorker(strCode);
-        if(nullptr == worker)
-            worker = CreatLiveWorker(strCode);
+        CLiveWorker* worker = CreatLiveWorker(strCode);
         return (ILiveWorker*)worker;
     }
 }
