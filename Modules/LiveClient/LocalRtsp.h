@@ -6,6 +6,8 @@
 namespace LiveClient
 {
 
+extern void init_local_rtsp();
+
 class CLiveWorker;
 
 class CLocalRtsp

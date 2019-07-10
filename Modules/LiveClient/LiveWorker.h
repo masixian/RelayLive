@@ -35,15 +35,19 @@ namespace LiveClient
         /** 接收数据超时发起的结束操作，通知发送连接断开 */
         void stop();
 
+		bool play(uint32_t port);
+
+		void parseSdp();
+
         bool m_bRtp;
         vector<string>           m_vecSDP;      // 缓存必要的sdp信息
-
-    private:
+		string                   m_strServerIP; // 发送端IP
+		uint32_t                 m_nServerPort; //发送端口
+        uint32_t                 m_nPort;       //< rtp接收端口
         string                   m_strCode;     // 播放媒体编号
         string                   m_strSDP;      // sip服务器返回的sdp
         CLocalRtspRequest       *m_pRtspReq;
         uint32_t                 m_nType;          //< 0:live直播；1:record历史视频
-        uint32_t                 m_nPort;          //< rtp接收端口
         ILiveHandle             *m_pHandle;
         uint32_t                 m_nID;
     };

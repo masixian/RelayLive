@@ -147,6 +147,7 @@ CLocalRtsp::CLocalRtsp(void)
 
 CLocalRtsp::~CLocalRtsp(void)
 {
+	destory_rtsp(m_pRtspHandle);
 }
 
 int CLocalRtsp::answer(rtsp_ruquest_t *req)
@@ -172,20 +173,50 @@ int CLocalRtsp::answer(rtsp_ruquest_t *req)
                 res.code = Code_400_BadRequest;
                 break;
             }
+			//m_strServerIP = m_pLiveWorker->m_strServerIP;
+			//m_nServerPort = m_pLiveWorker->m_nServerPort;
+			//m_nClientPort = m_pLiveWorker->m_nPort;
 
-            stringstream ss;
-            ss << "v=0\r\n";
-            for(auto it:m_pLiveWorker->m_vecSDP){
-                ss << it << "\r\n";
-            }
-            ss << "a=recvonly\r\n";
+   //         stringstream ss;
+   //         ss << "v=0\r\n";
+   //         for(auto it:m_pLiveWorker->m_vecSDP){
+   //             ss << it << "\r\n";
+   //         }
+   //         ss << "a=recvonly\r\n";
 
             res.code = Code_200_OK;
-            res.body = ss.str();
+            //res.body = ss.str();
+			res.body = "v=0\r\n"
+						"o=36030100062000000000 0 0 IN IP4 10.9.0.2\r\n"
+						"s=Play\r\n"
+						"u=36030100061320000026:3\r\n"
+						"c=IN IP4 127.0.0.1\r\n"
+						"t=0 0\r\n"
+						"a=sdplang:en\r\n"
+						"a=range:npt=0-\r\n"
+						"a=control:*\r\n"
+						"m=video 18000 RTP/AVP 96\r\n"
+						"a=rtpmap:96 MP2P/90000\r\n"
+						"a=recvonly\r\n"
+						"y=0301000168\r\n";
             res.headers.insert(make_pair("Content-Type","application/sdp"));
             res.headers.insert(make_pair("Content-Length",StringHandle::toStr<size_t>(res.body.size())));
         } else if(req->method == rtsp_method::RTSP_SETUP) {
+			uint32_t ID;
+            sscanf(req->uri, "rtsp://%*[^/]/%d", &ID);
+			m_pLiveWorker = GetLiveWorker(ID);
+			if(!m_pLiveWorker || !m_pLiveWorker->play(req->rtp_port)) {
+                res.code = Code_400_BadRequest;
+                break;
+            }
+			m_strServerIP = m_pLiveWorker->m_strServerIP;
+			m_nServerPort = m_pLiveWorker->m_nServerPort;
+			m_nClientPort = m_pLiveWorker->m_nPort;
+
+			char transport[50]={0};
+			sprintf(transport, "RTP/AVP;unicast;client_port=%d-%d;source=%s;server_port=%d-%d", m_nClientPort, m_nClientPort+1, m_strServerIP.c_str(),m_nServerPort, m_nServerPort+1);
             res.code = Code_200_OK;
+			res.headers.insert(make_pair("Transport",transport));
             res.headers.insert(make_pair("Session",make_session_id()));
         } else if(req->method == rtsp_method::RTSP_PLAY) {
             res.code = Code_200_OK;
@@ -221,6 +252,7 @@ int CLocalRtsp::answer(rtsp_ruquest_t *req)
     }
     ss << "\r\n";
     string strResponse = ss.str();
+	Log::debug(strResponse.c_str());
 
     //发送应答
     uv_write_t *wr = (uv_write_t*)malloc(sizeof(uv_write_t));
@@ -244,12 +276,17 @@ static int write_buffer(void *opaque, uint8_t *buf, int buf_size){
     return buf_size;
 }
 
+static void ffmpeg_play_thread(void* arg) {
+    CLocalRtspRequest* rtsp = (CLocalRtspRequest*)arg;
+	rtsp->Play();
+}
 
 CLocalRtspRequest::CLocalRtspRequest(uint32_t ID, uint32_t port)
     : m_nWorkerID(ID)
     , m_nRtpPort(port)
 {
-
+	uv_thread_t tid;
+    //uv_thread_create(&tid, ffmpeg_play_thread, this);
 }
 
 CLocalRtspRequest::~CLocalRtspRequest()
@@ -266,20 +303,24 @@ bool CLocalRtspRequest::Play()
     char rtsp_uri[MAX_PATH]={0};
     sprintf(rtsp_uri, "rtsp://%s:%d/%d",g_strRtpIP.c_str(), LOCAL_RTSP_PORT, m_nWorkerID);
 
+	Log::debug("%s   %d", rtsp_uri, m_nRtpPort);
+
     AVDictionary* options = NULL;
-    //av_dict_set(&options, "buffer_size", "102400", 0); //设置缓存大小，1080p可将值调大
+    av_dict_set(&options, "buffer_size", "102400", 0); //设置缓存大小，1080p可将值调大
     av_dict_set(&options, "rtsp_transport", "udp", 0); //以udp方式打开，如果以tcp方式打开将udp替换为tcp
     //av_dict_set(&options, "stimeout", "2000000", 0); //设置超时断开连接时间，单位微秒
     //av_dict_set(&options, "max_delay", "500000", 0); //设置最大时延
     char rtp_port[10]={0};
     sprintf(rtp_port, "%d", m_nRtpPort);
+	char rtcp_port[10]={0};
+    sprintf(rtcp_port, "%d", m_nRtpPort+2);
     av_dict_set(&options, "min_port", rtp_port, 0);
-    av_dict_set(&options, "max_port", rtp_port, 0);
+    av_dict_set(&options, "max_port", rtcp_port, 0);
     int ret = avformat_open_input(&ifc, rtsp_uri, NULL, &options);
     if (ret != 0) {
         char tmp[1024]={0};
         av_strerror(ret, tmp, 1024);
-        Log::error("Could not open input file '%s': %d(%s)", g_strRtpIP.c_str(), ret, tmp);
+        Log::error("Could not open input file '%s': %d(%s)", rtsp_uri, ret, tmp);
         goto end;
     }
     ret = avformat_find_stream_info(ifc, NULL);

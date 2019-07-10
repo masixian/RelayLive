@@ -2,6 +2,7 @@
 #include "LiveClient.h"
 #include "LiveIpc.h"
 #include "LiveWorker.h"
+#include "LocalRtsp.h"
 
 namespace LiveClient
 {
@@ -43,9 +44,7 @@ namespace LiveClient
         else if(g_nRtpStreamType == 1)
             g_stream_type = STREAM_H264;
 
-#ifdef USE_FFMPEG
-
-#endif
+		init_local_rtsp();
     }
 
     string GetClientsInfo() 

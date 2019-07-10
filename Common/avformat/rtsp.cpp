@@ -203,7 +203,17 @@ void rtsp_handle_request(rtsp *h, char *data, int len) {
             }
             if(!strcasecmp(key, "CSeq")) {
                 req->CSeq = atoi(value);
-            } else {
+			} else {
+				//½âÎö³örtp¶Ë¿Ú
+				if(!strcasecmp(key, "Transport")) {
+					char *cp = strstr(value, "client_port=");
+					if(cp) {
+						int p1=0, p2=0;
+						sscanf(cp, "client_port=%d-%d", &p1, &p2);
+						req->rtp_port = p1;
+						req->rtcp_port = p2;
+					}
+				}
                 if(!req->headers) {
                     req->headers = create_hash_map(void*, void*);
                     hash_map_init_ex(req->headers, 0, string_map_hash, string_map_compare);
@@ -237,10 +247,10 @@ void rtsp_handle_answer(rtsp *h, char *data, int len) {
 
 }
 
-char* rtsp_request_get_header(rtsp_ruquest_t *req, char *data){
+const char* rtsp_request_get_header(rtsp_ruquest_t *req, char *data){
     string_t* str_h = (string_t*)hash_map_find_easy_str(req->headers, data);
     if(str_h)
-        string_c_str(str_h);
+        return string_c_str(str_h);
 
     return NULL;
 }

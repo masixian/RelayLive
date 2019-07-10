@@ -102,6 +102,6 @@ extern void rtsp_handle_answer(rtsp *h, char *data, int len);
 /**
  * 获取rtsp请求头内容
  */
-extern char* rtsp_request_get_header(rtsp_ruquest_t *req, char *data);
+extern const char* rtsp_request_get_header(rtsp_ruquest_t *req, char *data);
 
 #endif

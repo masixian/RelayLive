@@ -84,15 +84,15 @@ namespace LiveClient
         }
 
         string sdp;
-        if(LiveIpc::RealPlay(strCode, g_strRtpIP,  rtpPort, sdp))
-        {
-            //uv_thread_t tid;
-            //uv_thread_create(&tid, live_worker_destory_thread, pNew);
-            Log::error("play failed %s",strCode.c_str());
-            return nullptr;
-        }
-
-        Log::debug("RealPlay ok: %s",strCode.c_str());
+        //if(LiveIpc::RealPlay(strCode, g_strRtpIP,  rtpPort, sdp))
+        //{
+        //    //uv_thread_t tid;
+        //    //uv_thread_create(&tid, live_worker_destory_thread, pNew);
+        //    Log::error("play failed %s",strCode.c_str());
+        //    return nullptr;
+        //}
+		//
+        //Log::debug("RealPlay ok: %s",strCode.c_str());
 
         static int ID = 0;
         ID++;
@@ -167,28 +167,7 @@ namespace LiveClient
         , m_bStop(false)
         , m_bOver(false)
     {
-        //从sdp解析出视频源ip和端口
-        bnf_t* sdp_bnf = create_bnf(sdp.c_str(), sdp.size());
-        char *sdp_line = NULL;
-        char remoteIP[25]={0};
-        int remotePort = 0;
-        while (bnf_line(sdp_bnf, &sdp_line)) {
-            if(sdp_line[0]=='c'){
-                sscanf(sdp_line, "c=IN IP4 %[^/\r\n]", remoteIP);
-            } else if(sdp_line[0]=='m') {
-                sscanf(sdp_line, "m=video %d %[^ \r\n]", &remotePort);
-            }
-
-            if(sdp_line[0]=='o' || sdp_line[0]=='s' || sdp_line[0]=='c' || sdp_line[0]=='t' || sdp_line[0]=='m'){
-                char tmp[256]={0};
-                sscanf(sdp_line, "%[^\r\n]", tmp);
-                m_vecSDP.push_back(tmp);
-            } else if(sdp_line[0]=='a' && !strncmp(sdp_line, "a=rtpmap:", 9)){
-                char tmp[256]={0};
-                sscanf(sdp_line, "%[^\r\n]", tmp);
-                m_vecSDP.push_back(tmp);
-            }
-        }
+        parseSdp();
 
         m_pRtspReq = new CLocalRtspRequest(ID, rtpPort);
     }
@@ -247,5 +226,57 @@ namespace LiveClient
         m_pHandle->push_video_stream(buff);
     }
 
+	bool CLiveWorker::play(uint32_t port)
+	{
+		 m_nPort = port;
+        if(LiveIpc::RealPlay(m_strCode, g_strRtpIP,  port, m_strSDP))
+        {
+            //uv_thread_t tid;
+            //uv_thread_create(&tid, live_worker_destory_thread, pNew);
+            Log::error("play failed %s",m_strCode.c_str());
+            return false;
+        }
+		parseSdp();
+		
+        Log::debug("RealPlay ok: %s",m_strCode.c_str());
+		return true;
+	}
 
+	void CLiveWorker::parseSdp()
+	{
+		//从sdp解析出视频源ip和端口
+        bnf_t* sdp_bnf = create_bnf(m_strSDP.c_str(), m_strSDP.size());
+        char *sdp_line = NULL;
+        char remoteIP[25]={0};
+        int remotePort = 0;
+        while (bnf_line(sdp_bnf, &sdp_line)) {
+            if(sdp_line[0]=='c'){
+                sscanf(sdp_line, "c=IN IP4 %[^/\r\n]", remoteIP);
+				m_strServerIP = remoteIP;
+            } else if(sdp_line[0]=='m') {
+                sscanf(sdp_line, "m=video %d ", &remotePort);
+				m_nServerPort = remotePort;
+            }
+
+            if(sdp_line[0]=='o' || sdp_line[0]=='s' || sdp_line[0]=='c' || sdp_line[0]=='t' || sdp_line[0]=='m'){
+                char tmp[256]={0};
+                sscanf(sdp_line, "%[^\r\n]", tmp);
+                m_vecSDP.push_back(tmp);
+            } else if(sdp_line[0]=='a' && !strncmp(sdp_line, "a=rtpmap:", 9)){
+				//a=rtpmap:96 PS/90000
+                char tmp[256]={0};
+				int num = 0;
+				char type[20]={0};
+				int bitrate = 0;
+                sscanf(sdp_line, "a=rtpmap:%d %[^/]/%d", &num, type, &bitrate);
+				if(!strcmp(type, "PS")){
+					sprintf(tmp,"a=rtpmap:%d MP2P/%d", num, bitrate);
+				}else{
+					sprintf(tmp,"a=rtpmap:%d %s/%d", num, type, bitrate);
+				}
+                m_vecSDP.push_back(tmp);
+            }
+        }
+		destory_bnf(sdp_bnf);
+	}
 }
